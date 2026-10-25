@@ -54,17 +54,29 @@ fi
 codesign -s "${ID:--}" --force "$APP"
 # register with macOS, or System Settings can't list it for permissions
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
-# Coming from Atticus: keep its settings, memory and history, and stop the old app so two copies never fight over one shortcut.
-if [ -d ~/.config/atticus ] && [ ! -L ~/.config/atticus ] && [ ! -e ~/.config/jarvis ]; then
-  mv ~/.config/atticus ~/.config/jarvis && ln -s ~/.config/jarvis ~/.config/atticus   # the link keeps paths saved inside old files working
-  echo "Moved your Atticus settings, memory and history to ~/.config/jarvis."
-fi
+# Coming from Atticus: stop the old app first, so two copies never fight over one shortcut and nothing writes mid-move.
 for OLD in ~/Library/LaunchAgents/com.atticus.app.plist ~/Library/LaunchAgents/com.atticus.routine.*.plist; do
   [ -f "$OLD" ] || continue   # routines come back under com.jarvis.routine the next time Jarvis starts
   launchctl bootout gui/$(id -u) "$OLD" 2>/dev/null || true
   rm -f "$OLD"
 done
 pkill -f "/Atticus.app/Contents/MacOS/Atticus$" 2>/dev/null || true
+# Then keep its settings, memory and history. The link keeps paths saved inside old files (agent folders) working;
+# learned shortcuts and workflows saved Atticus's helper path, so those now point at Jarvis's.
+if [ -d ~/.config/atticus ] && [ ! -L ~/.config/atticus ] && [ ! -e ~/.config/jarvis ]; then
+  mv ~/.config/atticus ~/.config/jarvis && ln -s ~/.config/jarvis ~/.config/atticus
+  python3 - ~/.config/jarvis ~/Applications/Atticus.app/Contents/Resources/atticus.py "$APP/Contents/Resources/jarvis.py" <<'PY' || echo "Note: some learned shortcuts still point at Atticus; Jarvis relearns each one the first time it fails."
+import os, pathlib, sys
+root, old, new = sys.argv[1:]
+for path in pathlib.Path(root).rglob('*'):
+    if path.suffix not in ('.json', '.jsonl', '.md') or not path.is_file(): continue
+    text = path.read_text(errors='surrogateescape')
+    if old not in text: continue
+    tmp = path.with_name(path.name + '.migrating')   # replaced in one step, with the file's own permissions
+    tmp.write_text(text.replace(old, new), errors='surrogateescape'); os.chmod(tmp, path.stat().st_mode & 0o777); os.replace(tmp, path)
+PY
+  echo "Moved your Atticus settings, memory and history to ~/.config/jarvis."
+fi
 AGENT=~/Library/LaunchAgents/com.jarvis.app.plist   # starts at login, restarts if it crashes (Quit stays quit)
 mkdir -p ~/Library/LaunchAgents ~/.config/jarvis
 cat > "$AGENT" <<P

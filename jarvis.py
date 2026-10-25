@@ -7627,6 +7627,7 @@ if __name__ == '__main__':
         assert label('Bash', {'command': SHOW + ' --bg "https://www.amazon.com/s?k=epsom+salt" && sleep 3 && ' + WEB + ' read'}) == 'Opening amazon.com'
         assert label('Bash', {'command': HANDS + ' click Export'}) == 'Clicking “Export”'
         assert label('Bash', {'command': "osascript -e 'tell application \"Music\" to playpause'"}) == 'Using Music'
+        installed_apps = lambda: {'TradingView', 'Notes', 'Mail'}   # selftest: the same apps on every Mac, so it passes without TradingView
         assert app_named('the trading view application') == 'TradingView'
         assert screen_for('open spotify', None, 'readable ' * 40) is None   # no screen words: no picture, no wait
         assert plain('Hey Jarvis, can you open Spotify please?') == plain('Can you also open Spotify?') == 'open spotify'

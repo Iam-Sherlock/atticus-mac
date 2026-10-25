@@ -11,3 +11,14 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Installer syntax
         run: bash -n build.sh install.sh
+  macos-build:
+    # Linux can't compile the app; this is the build.sh compile plus both selftests, without installing anything.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Jarvis.swift as build.sh does
+        run: swiftc -O -target "$(uname -m)-apple-macos26.0" Jarvis.swift -o "$RUNNER_TEMP/Jarvis"
+      - name: Native selftest
+        run: JARVIS_RESOURCES_DIR="$PWD" JARVIS_DIR="$RUNNER_TEMP/config" "$RUNNER_TEMP/Jarvis" --selftest
+      - name: Brain selftest
+        run: JARVIS_DIR="$RUNNER_TEMP/config" python3 jarvis.py --selftest

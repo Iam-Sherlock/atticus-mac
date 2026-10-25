@@ -324,9 +324,8 @@ class FlowTests(unittest.TestCase):
         asked.assert_not_called()   # Safe mode: showing is read-only, no Allow card
         self.assertNotEqual(allowed.get('permissionDecision'), 'deny')
 
-    @unittest.skipUnless(sys.platform == 'darwin', 'the selftest matches macOS apps (Notes, Mail)')
-    def test_python_selftest_uses_current_settings_rows(self):
-        home = Path(self.root.name, 'home'); (home / 'Applications' / 'TradingView.app').mkdir(parents=True)   # the app the selftest names, not his installed one
+    def test_python_selftest_uses_current_settings_rows(self):   # its installed apps are fixed, so it runs on Linux CI too
+        home = Path(self.root.name, 'home'); home.mkdir()
         env = {**{k: v for k, v in os.environ.items() if not k.startswith('JARVIS_')}, 'JARVIS_DIR': self.root.name, 'HOME': str(home)}   # earlier tests leave JARVIS_* set
         result = subprocess.run([sys.executable, jarvis.ME, '--selftest'], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

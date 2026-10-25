@@ -185,7 +185,7 @@ After that, Jarvis lives in the menu bar. Open it from Spotlight (⌘Space, "Jar
 If you sign out of your AI client later, the setup window comes back by itself.
 To see it again: `defaults delete com.jarvis.app onboarded`, then restart the app.
 
-Test: `python3 jarvis.py --selftest` on macOS, plus `python3 -m unittest discover -s tests -v` for offline regressions. After building, `~/Applications/Jarvis.app/Contents/MacOS/Jarvis --selftest` checks native transcript matching without opening the app. Node, when installed, also checks embedded JavaScript syntax. For the UI interaction checks, run `python3 -m http.server 8765 --bind 127.0.0.1` from the repo and open `http://127.0.0.1:8765/tests/ui.html`; it uses a mock native bridge and makes no Mac actions or AI calls.
+Test: `python3 jarvis.py --selftest`, plus `python3 -m unittest discover -s tests -v` for offline regressions; both also run on Linux, where the macOS-only tests skip. CI compiles the app and runs both selftests on macOS (`.github/workflows/checks.yml`). After building, `~/Applications/Jarvis.app/Contents/MacOS/Jarvis --selftest` checks native transcript matching without opening the app. Node, when installed, also checks embedded JavaScript syntax. For the UI interaction checks, run `python3 -m http.server 8765 --bind 127.0.0.1` from the repo and open `http://127.0.0.1:8765/tests/ui.html`; it uses a mock native bridge and makes no Mac actions or AI calls.
 
 Remove: `launchctl bootout gui/$(id -u)/com.jarvis.app`, then delete `~/Applications/Jarvis.app`, `~/.jarvis`, `~/.config/jarvis` (your settings and history), `~/Library/LaunchAgents/com.jarvis.app.plist` and any `~/Library/LaunchAgents/com.jarvis.routine.*.plist`. If you came from Atticus, also delete the `~/.config/atticus` link.
 
