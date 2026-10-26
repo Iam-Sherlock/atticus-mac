@@ -129,7 +129,9 @@ class TelemetryTests(unittest.TestCase):
                  ('400: model does not support tools', True, 'server_rejected'),
                  ('422: incompatible request', True, 'server_rejected'),
                  ('OAuth session expired', False, 'signed_out'),
-                 ('HTTP 429', False, 'rate_limited'), ('network connection failed', False, 'offline')]
+                 ('HTTP 429', False, 'rate_limited'), ('Rate limit reached for requests', False, 'rate_limited'),
+                 ('You’ve hit your weekly limit · resets 3pm', False, 'plan_limit'), ('Context window limit reached', False, 'too_long'),
+                 ('network connection failed', False, 'offline')]
         with patch.object(jarvis, 'report_error') as sent:
             for detail, custom, why in cases:
                 self.assertEqual(jarvis.failure_why(detail, custom), why)
@@ -170,6 +172,22 @@ class TelemetryTests(unittest.TestCase):
             self.assertTrue(marker.exists())
             with patch.object(Path, 'touch', side_effect=FileNotFoundError):
                 self.assertIsNone(jarvis.ask_user({'q': 'Send?', 'cmd': 'fixture'}, 0))
+
+    def test_question_after_ask_cleanup_is_cancelled_without_publishing_a_card(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(jarvis, 'DIR', root), \
+             patch.dict(os.environ, {'JARVIS_ASK': str(Path(root, 'removed-ask'))}), \
+             patch.object(jarvis, 'private_json') as publish:
+            directory = Path(root, 'removed-ask')
+            directory.mkdir()
+            open_lock = os.open
+            def cancelled_before_lock(path, flags, mode):
+                directory.rmdir()
+                return open_lock(path, flags, mode)
+            with patch.object(jarvis.os, 'open', side_effect=cancelled_before_lock):
+                self.assertIsNone(jarvis.ask_user({'q': 'Send?', 'cmd': 'fixture'}, 60))
+            self.assertIsNone(jarvis.ask_user({'q': 'Send?', 'cmd': 'fixture'}, 60))
+            publish.assert_not_called()
+            self.assertFalse(Path(root, 'removed-ask').exists())
 
     def test_main_crash_is_reported_once_with_the_handled_exit_status(self):
         with patch.object(jarvis, 'main', side_effect=RuntimeError('private detail')), \
@@ -213,6 +231,14 @@ class TelemetryTests(unittest.TestCase):
                 threading.excepthook(SimpleNamespace(exc_type=type(error), exc_value=error, exc_traceback=None))
             sys.stdout.close()
         stop.assert_called_once(); sent.assert_not_called()
+
+    def test_a_daemon_thread_failing_during_shutdown_is_not_a_crash(self):
+        with patch.object(sys, 'excepthook'), patch.object(threading, 'excepthook') as previous, \
+             patch.object(threading, 'main_thread', return_value=SimpleNamespace(is_alive=lambda: False)), \
+             patch.object(jarvis, 'report_error') as sent:
+            jarvis.install_exception_hooks()
+            threading.excepthook(SimpleNamespace(exc_type=ValueError, exc_value=ValueError(), exc_traceback=None))
+        sent.assert_not_called(); previous.assert_not_called()
 
     def test_a_backend_broken_pipe_with_live_output_is_a_real_failure(self):
         with patch.object(jarvis, 'main', side_effect=BrokenPipeError), patch.object(jarvis, 'end_turn'), \

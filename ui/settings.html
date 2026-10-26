@@ -324,7 +324,7 @@
       <div class="row"><div class="t"><b>Shortcut opens</b></div><div class="seg" data-k="input"><button data-v="voice">Voice</button><button data-v="type">Typing</button></div></div>
       <div class="row"><div class="t"><b id="talklabel">Shortcut behavior</b><span id="talkhint">Esc cancels.</span></div><div class="seg" data-k="talkMode" role="group" aria-labelledby="talklabel"><button data-v="hold">Hold to talk</button><button data-v="toggle">Press to toggle</button></div></div>
     </div>
-    <h3>Voice</h3>
+    <h3>Dictation</h3>
     <div class="group">
       <div class="row"><div class="t"><b>Microphone</b></div><select data-k="microphone"></select></div>
       <div class="row"><div class="t"><b>Speech model</b><span>Speech stays on this Mac. <i class="info" title="Speech: free, English (US), on this Mac. Dictation: the model your keyboard’s mic uses.">i</i></span></div><div class="seg" data-k="speechModel"><button data-v="speech">Speech</button><button data-v="dictation">Dictation</button></div></div>
@@ -424,7 +424,7 @@
     <h3>Privacy</h3>
     <div class="group">
       <div class="row"><div class="t"><b>Look at my screen</b><span>Only when you mean it, like “this”. <i class="info" title="The picture goes with that one ask.">i</i></span></div><div class="seg" data-k="screen"><button data-v="auto">Automatic</button><button data-v="never">Never</button></div></div>
-      <div class="row"><div class="t"><b>Hide from screen sharing</b></div><label class="sw"><input type="checkbox" data-k="hideWhenSharing"></label></div>
+      <div class="row"><div class="t"><b>Hide from screen sharing</b><span id="sharingUnavailable" hidden>On this macOS version, Jarvis windows can appear in screen sharing.</span></div><label class="sw"><input type="checkbox" data-k="hideWhenSharing"></label></div>
     </div>
     <h3>Permissions</h3>
     <div class="group" id="perms">
@@ -482,6 +482,7 @@
     <h3>Jarvis</h3>
     <div class="group">
       <div class="row"><div class="t"><b>Source code</b><span>On GitHub.</span></div><button class="btn" data-do="github">Open</button></div>
+      <div class="row"><div class="t"><b>Ideas when I’m away</b><span>Now and then, a short idea if you haven’t used Jarvis.</span></div><label class="sw"><input type="checkbox" data-k="comeBack"></label></div>
     </div>
   </section>
   <section id="feedback">
@@ -962,6 +963,7 @@
       if (d.icon) $('icon').src = $('bigicon').src = d.icon;
       $('ver').textContent = $('aboutver').textContent = d.version ? 'Version ' + d.version : 'Jarvis';
       $('autoUpdateRow').hidden = $('checkUpdate').hidden = !!d.managedUpdates;
+      $('sharingUnavailable').hidden = !d.sharingUnavailable;
       $('updateTitle').textContent = d.managedUpdates ? 'Updates are managed by Nix' : 'Check for updates';
       $('upstatus').textContent = d.update || 'Never checked this session.';
       if (d.mics) this.mics(d.mics);

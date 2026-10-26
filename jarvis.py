@@ -521,7 +521,7 @@ Tools:
 Earlier supplies follow-ups. "this"/"here" = front window; "it" after a task = Last task window. Answer/draw from open content (video, page, doc) unless told not to.
 Memory: follow rules. Recall/forget X: --me find, then drop a fact or {FORGET} the exact rule. Save personal facts: {ABOUT} <category> "<kind>" "<exact words from now/Earlier>"; how-tos: {REMEMBER} "<rule>".
 Shortcuts: "when I say X, do Y" in any words: run and verify Y, then end with [shortcut X], X in the user's exact words. Jarvis saves the verified actions and tells the user; never save it yourself (shortcut or rule) or say it is saved.
-Own settings: {SET} "<setting name>" on|off|<option>, never click in Settings. Show Settings: open -a Jarvis.
+Settings: {SET} "<name>" on|off|<option>. Unsupported: open -a Jarvis; say change it there. Never click.
 Corrections: fix the task, then save one short user preference, not app/site-specific workarounds.
 If Context has a Previous learned shortcut and the current request reports it failed, redo its task and include [unlearn]; else ignore it.
 NEVER_RISKY
@@ -834,7 +834,8 @@ def ask_user(j, secs):
             except FileNotFoundError: pass   # the cancelled ask's owner already removed its folder
         return answer
     deadline = time.monotonic() + secs
-    fd = os.open(os.path.join(d, 'permission.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+    try: fd = os.open(os.path.join(d, 'permission.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+    except FileNotFoundError: return None   # the request owner already removed the cancelled ask
     with os.fdopen(fd, 'r+') as lock:
         # Parallel tool hooks must never overwrite each other's card or consume each other's answer.
         while True:
@@ -896,26 +897,30 @@ def set_switch(words, on):
     """{SET}: the setting whose name shares the most words with what the user said (first 3 letters, so "asking" finds "Ask").
     on: on|off for a switch, or one of a choice setting's options."""
     stem = lambda t: {w[:3] for w in re.findall(r'[a-z]+', t.lower()) if w not in ('the', 'me', 'my', 'on', 'off', 'setting', 'in', 'a')}
+    def unavailable(message='That setting is not available by voice. Jarvis Settings is open; change it there.'):
+        subprocess.run(['open', '-a', 'Jarvis'], capture_output=True)
+        print(message)
     if on not in ('on', 'off'):
         rows = picks()
         k = max(rows, key=lambda k: len(stem(words) & stem(rows[k][0])) * 2 + len(stem(on) & stem(' '.join(rows[k][1]))))
         name, options = rows[k]
         o = max(options, key=lambda o: len(stem(on) & stem(o + ' ' + options[o])))
         if not stem(words) & stem(name) or not stem(on) & stem(o + ' ' + options[o]):
-            return print('No such setting. Choices: ' + '; '.join(f'{n}: {", ".join(o)}' for n, o in rows.values()) + '. Switches (on|off): ' + ', '.join(switches().values()))
+            return unavailable()
         if k == 'client':
-            return print('Only the user can change the AI client in Settings.')
+            return unavailable('Only you can change the AI client. Jarvis Settings is open; change it there.')
         if os.environ.get('JARVIS_ASK'):
             ask_user({'set': k, 'value': options[o]}, 5)
         else:
             save_pref(k, options[o])
         return print(f'{name} is now {o}.')
     rows = switches()
+    words = re.sub(r'\b(voice|speech|speaking|talking)\b', 'read aloud', words, flags=re.I)
     k = max(rows, key=lambda k: len(stem(words) & stem(rows[k])))
     if not stem(words) & stem(rows[k]):
-        return print('No such switch. Switches: ' + ', '.join(rows.values()) + '. Choices: ' + '; '.join(f'{n}: {", ".join(o)}' for n, o in picks().values()))
+        return unavailable()
     if k == 'safe' and on == 'off':   # the AI may make Jarvis safer, never less safe: a web page could ask it to
-        return print('Only the user can turn Safe mode off: Settings > Account & Access > Safety. It is still on.')
+        return unavailable('Only you can turn Safe mode off. Jarvis Settings is open; change it under Account & Access → Safety.')
     if os.environ.get('JARVIS_ASK'):
         ask_user({'set': k, 'value': on == 'on'}, 5)
     else:
@@ -2197,8 +2202,11 @@ def look(cleanup=True, window=None):
     x, y, w, h = (window or {}).get('windowFrame') or (0, 0, 0, 0)
     home = next((i for i, s in enumerate(scr, 1) if s[1] <= x + w / 2 < s[1] + s[3] and s[2] <= y + h / 2 < s[2] + s[4]), None) if window else None
     def one(i):
-        ask = os.environ.get('JARVIS_ASK')   # AI helper images belong to the request owner, not this short-lived process.
-        fd, path = tempfile.mkstemp(prefix=f'jarvis-screen-{i}-', suffix='.jpg', dir=ask)
+        ask = os.environ.get('JARVIS_ASK') or None   # AI helper images belong to the request owner, not this short-lived process.
+        try: fd, path = tempfile.mkstemp(prefix=f'jarvis-screen-{i}-', suffix='.jpg', dir=ask)
+        except OSError:   # an ask folder this helper cannot write (EROFS seen in the field): the shared temp folder still works
+            if not ask: raise
+            ask = None; fd, path = tempfile.mkstemp(prefix=f'jarvis-screen-{i}-', suffix='.jpg')
         os.close(fd)
         os.remove(path)
         if cleanup and not ask:
@@ -2223,7 +2231,9 @@ def look(cleanup=True, window=None):
         snapshot = os.path.join(os.environ.get('JARVIS_ASK', DIR), 'draw-screens.json')
         try:
             if not mappings: raise ValueError('No captured displays')
-            private_json(snapshot, {'screens': mappings, 'target': target.result()})
+            try: anchor = target.result()
+            except (OSError, ValueError, subprocess.TimeoutExpired): anchor = None
+            private_json(snapshot, {'screens': mappings, 'target': anchor})
         except (OSError, ValueError, subprocess.TimeoutExpired):
             try: os.remove(snapshot)
             except OSError: pass
@@ -3407,14 +3417,21 @@ def report_error(kind, **props):
         posthog('error', {'kind': kind, **props})
 
 
+TOO_LONG = r'\bcontext\b[\w\s-]{0,20}\blimit\b|\b(?:prompt|input|request) is too long\b'   # the request outgrew the model's context window
+PLAN_LIMIT = r'\busage limit\b|\b(?<!rate.)limit\b.*\b(?:resets?|reached)\b|\bhit your\b.*\blimit\b'   # Claude plan limits ("You've hit your weekly limit · resets 3pm")
+
+
 def failure_why(detail, custom=False):
     """Classify backend errors, never the user's request or the model's ordinary answer."""
     for why, pattern in (
         ('signed_out', r'\b(?:o?auth(?:enticate|entication|orization)?|unauthori[sz]ed)\b|\b401\b|invalid (?:api )?key|not logged in|sign.?in'),
-        ('rate_limited', r'rate.?limit|usage limit|too many requests|\b429\b'),
+        ('too_long', TOO_LONG),
+        ('plan_limit', PLAN_LIMIT),
+        ('rate_limited', r'rate.?limit|too many requests|\b429\b'),
         ('offline', r'network|connect|dns|timed? ?out|timeout'),
         ('unavailable', r'overload|unavailable|service error|\b5\d\d\b'),
         ('sandbox', r'sandbox'),
+        ('outdated', r'unknown option|unrecognized (?:option|argument)'),
     ):
         if re.search(pattern, detail, re.I): return why
     # HTTP client errors mean the server rejected the configured request (model, tools, API compatibility).
@@ -3423,7 +3440,7 @@ def failure_why(detail, custom=False):
 
 def report_worker_failure(worker, model, why):
     if why == 'cancelled': return
-    setup = why in ('setup_needed', 'provider_needed', 'model_missing', 'server_rejected', 'signed_out', 'rate_limited', 'offline', 'unavailable', 'sandbox')
+    setup = why in ('setup_needed', 'provider_needed', 'model_missing', 'server_rejected', 'signed_out', 'too_long', 'plan_limit', 'rate_limited', 'offline', 'unavailable', 'sandbox')
     report_error('setup' if setup else 'worker_exit', worker=worker, model=model if model in ('haiku', 'sonnet', 'opus') else 'custom', why=why)
 
 
@@ -3448,6 +3465,7 @@ def install_exception_hooks():
         exception_error(exc_type, tb, value)
         previous_sys(exc_type, value, tb)
     def thread_hook(args):
+        if not threading.main_thread().is_alive(): return
         if issubclass(args.exc_type, SystemExit): return
         if issubclass(args.exc_type, BrokenPipeError) and stdout_closed():
             sys.stdout = open(os.devnull, 'w')
@@ -3504,6 +3522,7 @@ def ask_done(row):
 
 
 def say(tag, text):   # one line per message; an answer's own line breaks (lists, display math) travel as U+2028
+    if (tag, text) == ('!', 'setup') and not wait_commit(): return   # a request started while the user talks must not open Setup mid-hold
     if tag not in ('✓', '…'): text = ' '.join(text.split())
     else:   # lines inside ``` fences keep their spacing (code, text diagrams)
         fence, lines = False, []
@@ -3688,6 +3707,8 @@ def claude_plan():
         s = json.loads(subprocess.run(['claude', 'auth', 'status'], capture_output=True, text=True, timeout=20).stdout)
     except FileNotFoundError:
         return {'ok': False, 'need': 'install', 'text': 'Claude Code is not installed.'}
+    except OSError:
+        return {'ok': False, 'need': 'install', 'text': 'Could not start Claude Code. Reinstall it and try again.'}
     except (ValueError, subprocess.TimeoutExpired):
         return {'ok': False, 'need': 'login', 'text': 'Could not read your Claude sign-in.'}
     if not s.get('loggedIn'):
@@ -5180,7 +5201,7 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
         c = plan()
         run.why = 'signed_out' if c.get('need') == 'login' else 'setup_needed'
         say('!', 'setup')   # Jarvis.app opens its setup window
-        return c['text'] + ' Jarvis setup is open to fix it.', 0, []
+        return c['text'] + ' Open Jarvis Settings to finish setup.', 0, []
     if getattr(p, 'ask', ''):
         save_request(p.ask, main_ask(task, request)[0])
     content = user_content(task, shots, request)
@@ -5198,7 +5219,7 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
                 c = plan()
                 run.why = 'signed_out' if c.get('need') == 'login' else 'setup_needed'
                 say('!', 'setup')
-                return c['text'] + ' Jarvis setup is open to fix it.', 0, []
+                return c['text'] + ' Open Jarvis Settings to finish setup.', 0, []
             if getattr(p, 'ask', ''): save_request(p.ask, main_ask(task, request)[0])
     p.waiting = threading.Event()
     if getattr(p, 'ask', '') and getattr(p, 'relaying', False) is not True and os.environ.get('JARVIS_RELAY_ACTIVE') != str(os.getpid()):
@@ -5386,19 +5407,32 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
         detail = '\n'.join(filter(None, [reply if result_error else '', p.errors.read(2000).strip()]))
         run.error = clean(detail)
         custom = bool(server())
+        if custom and shots and re.search(r'\bmultimodal\b', detail, re.I):
+            if callable(getattr(getattr(p, 'stdout', None), 'close', None)): p.stdout.close()
+            if callable(getattr(getattr(p, 'errors', None), 'close', None)): p.errors.close()
+            return run(task, start_claude(getattr(p, 'jarvis_model', None)), (), auto_work,
+                       request=request, main_only=main_only, routing_retry=routing_retry)
         run.why = failure_why(detail, custom)
         if custom and run.why == 'stopped':
             selected, available = str(pref('apiModel', '')).strip(), models()
             if selected and available and selected not in available: run.why = 'model_missing'
         if not c['ok']:
             run.why = 'signed_out' if c.get('need') == 'login' else 'setup_needed'
-            reply = c['text'] + ' Jarvis setup is open to fix it.'
+            reply = c['text'] + ' Open Jarvis Settings to finish setup.'
         elif run.why == 'signed_out':
             if custom:
                 reply = 'Your custom server rejected its credentials. Check its key in Settings.'
             else:
                 say('!', 'setup')
-                reply = 'Your Claude sign-in expired. Jarvis setup is open to sign in again.'
+                reply = 'Your Claude sign-in expired. Open Jarvis Settings to sign in again.'
+        elif run.why == 'too_long':
+            reply = f'This request is too long for {"your custom server" if custom else "Claude"}. Close this box with ✕ to start fresh, then ask again with less text.'
+        elif run.why == 'plan_limit':
+            # Claude's own words say which limit, when it resets and what to try
+            plan_limit = '' if custom else next((l for l in detail.splitlines() if re.search(PLAN_LIMIT, l, re.I) and not l.startswith('API Error')), '')
+            plan_limit = re.sub(r'\|(\d+)\s*$', lambda m: time.strftime(' · resets %a %-I:%M %p', time.localtime(int(m[1]))), plan_limit)   # older Claude Code appends "|<reset epoch>"
+            plan_limit = ' '.join(plan_limit.split())[:200]
+            reply = f'Claude: {plan_limit}' if plan_limit else ('Your custom server' if custom else 'Claude') + ' reached its usage limit. Please try again after it resets.'
         elif run.why == 'rate_limited':
             reply = ('Your custom server' if custom else 'Claude') + ' is temporarily rate-limited. Please try again in a moment.'
         elif run.why == 'offline':
@@ -5408,10 +5442,12 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
             reply = ('Your custom server' if custom else 'Claude') + ' is temporarily unavailable. Please try again.'
         elif run.why == 'sandbox':
             reply = 'Claude’s sandbox could not start. Open Jarvis Settings → Account & Access → Safety, turn off Safe mode, and try again.'
+        elif run.why == 'outdated':
+            reply = 'Claude Code needs an update. Open Terminal, run claude update, then try again.'
         else:
             say('!', 'setup')
             reason = ' '.join(clean(detail).split()) or f'exit code {p.returncode}'
-            reply = f'{"Your custom server" if custom else "Claude"} stopped: {reason}. Jarvis setup is open; choose Set Up, then try again.'
+            reply = f'{"Your custom server" if custom else "Claude"} stopped: {reason}. Open Jarvis Settings, choose Set Up, then try again.'
     if auto_work and reply.endswith('[done]'):   # accepted from older warmed prompts during an update
         reply = reply[:-6].rstrip()
     # a step that failed and was then done another way is dropped, so the way that worked can still be learned
@@ -5435,7 +5471,7 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
             reply = 'Claude returned an empty answer. Please try again.'
         else:
             say('!', 'setup')
-            reply = 'Claude’s helper exited without returning a result. Jarvis setup is open; choose Set Up, then try again.'
+            reply = 'Claude’s helper exited without returning a result. Open Jarvis Settings, choose Set Up, then try again.'
     blocked = re.search(r'\b(block(?:ed)?|denied|not allowed|permission)\b|hook', run.error, re.I) or re.search(r'\btool\b.{0,30}\bblocked\b', reply, re.I)
     if last_failed and blocked and run.error.casefold() not in reply.casefold():
         reply = (reply.rstrip() + ' Tool reported: ' + run.error).strip()
@@ -5463,7 +5499,7 @@ def run_devin(task, shots=(), request=None):
     if not shutil.which('devin'):
         run.why = 'setup_needed'
         say('!', 'setup')   # Jarvis.app opens its setup window
-        return plan()['text'] + ' Jarvis setup is open to fix it.', 0, []
+        return plan()['text'] + ' Open Jarvis Settings to finish setup.', 0, []
     if not wait_commit():
         run.why = 'cancelled'
         return 'The request was cancelled before the transcript was confirmed.', 0, []
@@ -5518,10 +5554,10 @@ def run_devin(task, shots=(), request=None):
         run.why = failure_why(detail) if c['ok'] else 'setup_needed'
         if not c['ok']:
             if c.get('need') == 'login': run.why = 'signed_out'
-            reply = c['text'] + ' Jarvis setup is open to fix it.'
+            reply = c['text'] + ' Open Jarvis Settings to finish setup.'
         else:
             say('!', 'setup')
-            reply = f'Devin stopped: {clean(detail) or f"exit code {p.returncode}"}. Jarvis setup is open; choose Set Up, then try again.'
+            reply = f'Devin stopped: {clean(detail) or f"exit code {p.returncode}"}. Open Jarvis Settings, choose Set Up, then try again.'
     success = bool(reply and not p.returncode and not timed_out)
     if not deleted:
         warning = 'Jarvis could not delete Devin’s saved session. Remove it in Devin before continuing.'
@@ -5544,7 +5580,7 @@ def run_pi(task, shots=(), request=None):
     if not pi:
         run.why = 'setup_needed'
         say('!', 'setup')
-        return plan()['text'] + ' Jarvis setup is open to fix it.', 0, []
+        return plan()['text'] + ' Open Jarvis Settings to finish setup.', 0, []
     if not wait_commit():
         run.why = 'cancelled'
         return 'The request was cancelled before the transcript was confirmed.', 0, []
@@ -5571,6 +5607,7 @@ def run_pi(task, shots=(), request=None):
     signal.signal(signal.SIGTERM, lambda *_: (stop_claude(p), stop_workers()))
     p.relay_thread = threading.Thread(target=relay, args=(p,), daemon=True); p.relay_thread.start()
     reply, cost, failed, timed_out = '', 0, False, [False]
+    model_error, aborted = '', False
     def expire():
         timed_out[0] = True
         stop_claude(p)
@@ -5585,6 +5622,9 @@ def run_pi(task, shots=(), request=None):
             else:
                 message = event.get('message')
                 if event.get('type') != 'message_end' or not isinstance(message, dict) or message.get('role') != 'assistant': continue
+                aborted = message.get('stopReason') == 'aborted'
+                model_error = (message.get('errorMessage') or 'Request failed') if message.get('stopReason') == 'error' else ''
+                if not isinstance(model_error, str): model_error = 'Request failed'
                 content = message.get('content', [])
                 if isinstance(content, str): reply = without_handoff_line(content)
                 elif isinstance(content, list): reply = without_handoff_line(''.join(block.get('text', '') for block in content if isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str)))
@@ -5600,25 +5640,42 @@ def run_pi(task, shots=(), request=None):
     steps = [row.get('step', '') for row in rows if row.get('step')]
     cmds = [row['input']['command'] for row in rows if row.get('tool') == 'exec' and row.get('input', {}).get('command')]
     run.ran = cmds
-    run.cmds = [] if failed or p.returncode or timed_out[0] or not reply else cmds
-    run.ok = bool(reply and not failed and not p.returncode and not timed_out[0])
+    errors.seek(0); detail = model_error or errors.read(2000).strip()
+    run.cmds = [] if failed or p.returncode or timed_out[0] or model_error or aborted or not reply else cmds
+    run.ok = bool(reply and not failed and not p.returncode and not timed_out[0] and not model_error and not aborted)
     if timed_out[0]:
         run.why = 'timed_out'
         reply = 'Pi timed out before finishing. Please try again.'
-    elif p.returncode:
-        errors.seek(0); detail = errors.read(500).strip()
+    elif aborted:
+        run.why = 'cancelled'
+        reply = 'The Pi request was cancelled.'
+    elif p.returncode or model_error or (not reply and detail):
         run.error = clean(detail)
         run.why = failure_why(detail)
         if run.why == 'stopped' and re.search(r'auth|credential|model|provider|login', detail, re.I): run.why = 'provider_needed'
+        reason = clean(detail) or f'exit code {p.returncode}'
         if run.why in ('signed_out', 'provider_needed'):
             say('!', 'setup')
-            reply = 'Pi needs a provider and model. Jarvis setup is open to fix it.'
+            reply = 'Pi needs a provider and model. Open Jarvis Settings, choose Set Up, then try again.'
+        elif run.why == 'too_long':
+            reply = 'This request is too long for Pi. Close this box with ✕ to start fresh, then ask again with less text.'
+        elif run.why == 'plan_limit':
+            reply = f'Pi stopped: {reason}. Please try again after the limit resets.'
+        elif run.why == 'rate_limited':
+            reply = f'Pi stopped: {reason}. Pi is temporarily rate-limited. Please try again in a moment.'
+        elif run.why == 'offline':
+            reply = f'Pi stopped: {reason}. Pi could not connect. Check your internet connection and try again.'
+        elif run.why == 'unavailable':
+            reply = f'Pi stopped: {reason}. Pi is temporarily unavailable. Please try again.'
+        elif run.why == 'outdated':
+            reply = 'Update Pi, then try again.'
         else:
             say('!', 'setup')
-            reply = f'Pi stopped: {clean(detail) or f"exit code {p.returncode}"}. Jarvis setup is open; choose Set Up, then try again.'
+            reply = f'Pi stopped: {reason}. Open Jarvis Settings, choose Set Up, then try again.'
     elif not reply and failed:
         run.why = 'tool_failed'
         reply = 'The last Pi tool failed, so I could not verify that the request was completed. Please try again.'
+    if not reply and not run.why: run.why = 'no_reply'
     if p.stdout:
         p.stdout.close()
     errors.close()
@@ -7040,6 +7097,8 @@ def main():
     if len(args) == 5 and args[:3] == ['--telemetry', 'error', 'worker_exit']:
         return report_error('worker_exit', worker=args[3] if args[3] in ('python', 'claude', 'devin', 'pi') else 'python',
                             exit=int(args[4]) if args[4].lstrip('-').isdigit() else -1)
+    if len(args) == 4 and args[:2] == ['--telemetry', 'idea'] and args[2] in ('shown', 'clicked') and args[3].isdigit():   # "Ideas when I'm away": which one, never its text
+        return posthog('idea', {'action': args[2], 'index': int(args[3])})
     if args == ['--draw', '--help']:
         return print(DRAW_HELP if pref('draw', True) else 'Screen drawings are off')
     if args[:1] == ['--draw']:
@@ -7498,8 +7557,9 @@ def main():
     if handed_off(): return
     if not wait_commit() or cancelled(): return
     previous = []
+    final = getattr(run, 'why', '') in ('plan_limit', 'too_long', 'signed_out', 'setup_needed', 'provider_needed', 'outdated')   # another run or model can't lift these
     # One continuation, including CLI asks; no task classifier or second fast-path call.
-    if offer_model and (reply.rstrip().endswith('[sonnet]') or not run.ok and run.work):   # a trailing [sonnet]: the model stopped short of a reachable goal
+    if offer_model and not final and (reply.rstrip().endswith('[sonnet]') or not run.ok and run.work):   # a trailing [sonnet]: the model stopped short of a reachable goal
         escalated, escalate_why = True, 'asked' if reply.strip() == '[sonnet]' else 'failed'
         model = work_model()
         say('▸', 'Continuing with ' + model.capitalize())
@@ -7515,11 +7575,11 @@ def main():
         run.ran = previous + run.ran
         reply, cost, steps = again or reply, None if cost is None or more is None else cost + more, steps + extra
         if handed_off(): return
-    elif not run.ok and os.environ.get('JARVIS_ASK'):
+    elif not run.ok and not final and os.environ.get('JARVIS_ASK'):
         if warm:
             os.environ['JARVIS_RELAY_ACTIVE'] = str(os.getpid())
             threading.Thread(target=relay, args=(None, os.environ['JARVIS_ASK']), daemon=True).start()
-        answer = plain(ask_user({'q': 'Couldn’t finish this', 'cmd': 'Try again with the same model.',
+        answer = plain(ask_user({'q': 'Couldn’t finish this', 'cmd': reply if getattr(run, 'why', '') == 'rate_limited' else 'Try again with the same model.',   # the card hides the reply until it's answered
                                  'retry': True, 'details': getattr(run, 'error', '')}, 60) or '')
         if answer in ('r', 'retry', 'try again'):
             previous = run.ran[:]

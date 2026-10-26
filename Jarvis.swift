@@ -15,6 +15,7 @@ import UniformTypeIdentifiers
 import EventKit
 import CoreAudio
 import AudioToolbox
+import NaturalLanguage
 
 let dir = ProcessInfo.processInfo.environment["JARVIS_RESOURCES_DIR"] ?? Bundle.main.resourcePath!   // build.sh copies jarvis.py and ui/ in here
 
@@ -194,7 +195,7 @@ enum Prefs {
             ["name": "Friendly", "text": "Warm and conversational, like talking to a colleague. Simple words."]],
         "selection": true, "ahead": true, "aheadDelay": 0.7, "live": true, "screen": "auto", "openOn": "here", "workIn": "back", "miniScreen": true, "draw": true, "guideSteps": "auto", "pageJS": false,
         "speak": false, "showAnswers": "stream", "autoCopy": false, "hideWhenSharing": true, "menuIcon": true, "autoUpdate": false,
-        "learn": true, "safe": true, "pointer": false, "meeting": false, "meetingSave": true, "meetingAuto": "sure", "meetingNudge": false, "meetingDetect": true, "learnMe": true, "stats": false, "tips": true, "askMe": true, "meetingSummary": true, "input": "voice", "talkMode": "hold", "speechModel": "speech", "improve": false, "improveAsked": false, "draftInsert": "ask",
+        "learn": true, "safe": true, "pointer": false, "meeting": false, "meetingSave": true, "meetingAuto": "sure", "meetingNudge": false, "meetingDetect": true, "learnMe": true, "stats": false, "tips": true, "comeBack": true, "askMe": true, "meetingSummary": true, "input": "voice", "talkMode": "hold", "speechModel": "speech", "improve": false, "improveAsked": false, "draftInsert": "ask",
         "dictateHotkeyCode": -1, "dictateHotkeyMods": 0, "dictateHotkeyLabel": "", "dictateMode": "cleanup", "dictateHistory": true, "dictateLearn": true, "dictateWords": [], "dictateFixes": [String: String](), "boxW": 500, "boxH": 420]
     static let retiredKeys = ["quietAudio", "quietLevel", "autoCopy", "askMe", "corner", "linger", "soundStart", "soundRelease", "soundDone", "soundStop",
         "instant", "live", "ahead", "aheadDelay", "learn", "selection", "guideSteps", "workIn", "openOn", "miniScreen", "draftInsert",
@@ -228,7 +229,12 @@ enum Prefs {
 }
 
 func applySharing(_ window: NSWindow) {
-    window.sharingType = Prefs.bool("hideWhenSharing") ? .none : .readOnly
+    window.sharingType = sharingType(hidden: Prefs.bool("hideWhenSharing"), majorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+}
+
+func sharingType(hidden: Bool, majorVersion: Int) -> NSWindow.SharingType {
+    // Work around reported macOS 27 blank content with .none; preserve the saved preference.
+    hidden && majorVersion < 27 ? .none : .readOnly
 }
 
 func profileName(_ path: String) -> String {
@@ -457,32 +463,10 @@ func spoken(_ answer: String) -> String {
     return s.replacingOccurrences(of: #"(?m)^#{1,4}\s+"#, with: "", options: .regularExpression).replacingOccurrences(of: #" {2,}"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
 }
 
-// Read-aloud uses the Mac's Spoken Content voice, and most people never pick one: switch it to Siri's once available.
-var siriVoiceTrying = false
-func siriVoice() {
-    guard !UserDefaults.standard.bool(forKey: "siriVoice"), !siriVoiceTrying else { return }
-    siriVoiceTrying = true
-    DispatchQueue.global().async {
-        defer { DispatchQueue.main.async { siriVoiceTrying = false } }
-        let key = "SpokenContentDefaultVoiceSelectionsByLanguage" as CFString, dom = "com.apple.Accessibility" as CFString
-        let old = CFPreferencesCopyAppValue(key, dom)
-        if (old as? [Any])?.contains(where: { (($0 as? [String: Any])?["voiceId"] as? String)?.hasPrefix("com.apple.siri.") == true }) == true {
-            UserDefaults.standard.set(true, forKey: "siriVoice"); return
-        }
-        let siri: [Any] = ["en", ["_type": "Speech.VoiceSelection", "_version": 0, "boundLanguage": "en", "voiceId": "com.apple.siri.natural.en-US-F"]]
-        CFPreferencesSetAppValue(key, siri as CFArray, dom); CFPreferencesAppSynchronize(dom)
-        let out = NSTemporaryDirectory() + "jarvis-voice.aiff", p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/say"); p.arguments = ["-o", out, "hi"]
-        try? p.run(); p.waitUntilExit()
-        let size = (try? FileManager.default.attributesOfItem(atPath: out)[.size] as? Int) ?? 0
-        try? FileManager.default.removeItem(atPath: out)
-        if p.terminationStatus != 0 || size < 1000 { CFPreferencesSetAppValue(key, old, dom); CFPreferencesAppSynchronize(dom) }
-        else { UserDefaults.standard.set(true, forKey: "siriVoice") }
-    }
-}
-
+// Read-aloud uses the Mac's saved voice explicitly: bare say can ignore Spoken Content.
 struct ReadAloudVoice {
     let name: String, language: String, quality: AVSpeechSynthesisVoiceQuality
+    var identifier: String = ""
 }
 func bestEnglishVoice(_ voices: [ReadAloudVoice], region: String?) -> ReadAloudVoice? {
     func rank(_ q: AVSpeechSynthesisVoiceQuality) -> Int { q == .premium ? 2 : q == .enhanced ? 1 : 0 }
@@ -494,9 +478,6 @@ func bestEnglishVoice(_ voices: [ReadAloudVoice], region: String?) -> ReadAloudV
         return local != other ? local : $0.name < $1.name
     }.first
 }
-let installedReadAloudVoice = bestEnglishVoice(AVSpeechSynthesisVoice.speechVoices().map {
-    ReadAloudVoice(name: $0.name, language: $0.language, quality: $0.quality)
-}, region: Locale.current.region?.identifier)
 func sayVoiceNames(_ output: String) -> Set<String> {
     Set(output.split(separator: "\n").compactMap { line in
         line.range(of: #"\s+[a-z]{2,3}_[A-Z0-9]{2,3}\s+#"#, options: .regularExpression).map { String(line[..<$0.lowerBound]) }
@@ -507,18 +488,51 @@ func sayVoiceName(_ name: String, names: Set<String>) -> String? {
     for quality in ["Premium", "Enhanced"] where names.contains("\(name) (\(quality))") { return "\(name) (\(quality))" }
     return names.sorted().first { $0.hasPrefix(name + " (") }
 }
-let usableReadAloudVoice: String? = {
+// "" means bare say: before macOS 27 it speaks a saved system voice that neither list shows (such as Siri).
+func preferredReadAloudVoice(_ selections: [Any], voices: [ReadAloudVoice], names: Set<String>, selected: String, region: String?, majorVersion: Int, language: String = "en") -> String? {
+    func sayName(_ voice: ReadAloudVoice) -> String? {
+        let quality = voice.quality == .premium ? "Premium" : voice.quality == .enhanced ? "Enhanced" : ""
+        let qualified = "\(voice.name) (\(quality))"
+        return !quality.isEmpty && names.contains(qualified) ? qualified : sayVoiceName(voice.name, names: names)
+    }
+    func base(_ code: String) -> String { String(code.lowercased().prefix { $0.isLetter }) }   // "en-US" -> "en"
+    if !selected.isEmpty, names.contains(selected) { return selected }
+    var byLanguage: [String: String] = [:], key = ""   // saved as ["en", {voiceId}, "es", {voiceId}]
+    for entry in selections {
+        if let k = entry as? String { key = base(k) }
+        else if let id = (entry as? [String: Any])?["voiceId"] as? String, byLanguage[key] == nil { byLanguage[key] = id }
+    }
+    let saved = [base(language), "en"].compactMap { byLanguage[$0] }   // the answer's language first, then English
+    for id in saved {
+        if let voice = voices.first(where: { $0.identifier == id }), let name = sayName(voice) { return name }
+    }
+    if !saved.isEmpty && majorVersion < 27 { return "" }
+    let usable = voices.filter { sayName($0) != nil }
+    return bestEnglishVoice(usable, region: region).flatMap { sayName($0) }
+}
+// Listed once per launch, as before: a voice downloaded later is used after Jarvis relaunches.
+let installedSayVoices: Set<String>? = {
     let p = Process(), out = Pipe()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/say"); p.arguments = ["-v", "?"]; p.standardOutput = out
     do { try p.run() } catch { return nil }
     let names = sayVoiceNames(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
     p.waitUntilExit()
-    return installedReadAloudVoice.flatMap { p.terminationStatus == 0 ? sayVoiceName($0.name, names: names) : nil }
+    return p.terminationStatus == 0 ? names : nil
 }()
-func readAloudArguments(_ words: String, compactTip: () -> Void) -> [String] {
-    guard !UserDefaults.standard.bool(forKey: "siriVoice"), !siriVoiceTrying else { return ["--", words] }
-    if usableReadAloudVoice == nil { compactTip() }
-    return (usableReadAloudVoice.map { ["-v", $0] } ?? []) + ["--", words]
+func usableReadAloudVoice(_ words: String) -> String? {
+    guard let names = installedSayVoices else { return nil }
+    let voices = AVSpeechSynthesisVoice.speechVoices().map {
+        ReadAloudVoice(name: $0.name, language: $0.language, quality: $0.quality, identifier: $0.identifier)
+    }
+    // shortcut: Apple's selection schema is undocumented; use an installed fallback until a public selection API exists.
+    let selections = CFPreferencesCopyAppValue("SpokenContentDefaultVoiceSelectionsByLanguage" as CFString, "com.apple.Accessibility" as CFString) as? [Any] ?? []
+    return preferredReadAloudVoice(selections, voices: voices, names: names, selected: Prefs.str("voice"), region: Locale.current.region?.identifier, majorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
+                                   language: NLLanguageRecognizer.dominantLanguage(for: words)?.rawValue ?? "en")
+}
+func readAloudArguments(_ words: String, pick: (String) -> String? = usableReadAloudVoice, compactTip: () -> Void) -> [String] {
+    let voice = pick(words)
+    if voice == nil { compactTip() }
+    return (voice.flatMap { $0.isEmpty ? nil : ["-v", $0] } ?? []) + ["--", words]
 }
 
 // The talk shortcut, any key plus modifiers, recorded in Settings: Carbon modifiers to register, and the
@@ -959,7 +973,8 @@ final class DrawingView: NSView {
                     let font = NSFont.systemFont(ofSize:["s":12,"m":15,"l":19][shape.size ?? "m"] ?? 15,weight:.semibold)
                     let attributes: [NSAttributedString.Key:Any] = [.font:font,.foregroundColor:light ? NSColor.black : NSColor.white]
                     let text = NSAttributedString(string:shape.text ?? "",attributes:attributes)
-                    let textSize = text.size(), size = CGSize(width:min(bounds.width-12,textSize.width+16),height:textSize.height+10)
+                    let measured = text.boundingRect(with:CGSize(width:bounds.width-30,height:.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading]).size
+                    let textSize = CGSize(width:ceil(measured.width)+2,height:ceil(measured.height)), size = CGSize(width:textSize.width+16,height:textSize.height+10)
                     // a label set near a mark but off it sits right beside that mark; with an arrow or line it stays where the model put it
                     let edges = shapes.contains { ["arrow","line","path"].contains($0.kind) } ? [] : targets.map { CGPoint(x:min(max(point.x,$0.minX),$0.maxX),y:min(max(point.y,$0.minY),$0.maxY)) }
                     let near = edges.min { hypot($0.x-point.x,$0.y-point.y) < hypot($1.x-point.x,$1.y-point.y) }
@@ -968,7 +983,7 @@ final class DrawingView: NSView {
                     let bg = CAShapeLayer(); bg.path = CGPath(roundedRect:box,cornerWidth:7,cornerHeight:7,transform:nil); bg.fillColor = (light ? color : color.blended(withFraction:0.2,of:.black) ?? color).cgColor
                     add(bg,box); hit(CGPath(rect:box,transform:nil),i)
                     let label = CATextLayer(); label.string = text; label.contentsScale = window?.backingScaleFactor ?? 2
-                    label.frame = CGRect(x:box.minX+8,y:box.midY-textSize.height/2,width:box.width-16,height:textSize.height); label.truncationMode = .end
+                    label.frame = CGRect(x:box.minX+8,y:box.midY-textSize.height/2,width:box.width-16,height:textSize.height); label.isWrapped = true
                     add(label,box); continue
                 }
                 let p = local(ScreenDrawing.beside(point,targets))
@@ -996,11 +1011,22 @@ final class DrawingCalloutView: NSView {
     static let font = NSFont.systemFont(ofSize:14,weight:.medium), notch: CGFloat = 7, margin: CGFloat = 12
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    static func body(_ text: String, width: CGFloat) -> NSTextView {
+        let view = NSTextView(frame:CGRect(x:0,y:0,width:width,height:0))
+        view.string = text; view.font = font; view.textColor = .white; view.drawsBackground = false
+        view.isEditable = false; view.isSelectable = true; view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.containerSize = NSSize(width:width,height:.greatestFiniteMagnitude)
+        view.layoutManager!.ensureLayout(for:view.textContainer!)
+        view.setFrameSize(NSSize(width:width,height:ceil(view.layoutManager!.usedRect(for:view.textContainer!).height)))
+        return view
+    }
     static func size(_ text: String, total: Int) -> CGSize {   // the card alone, without notch or shadow margin
-        let measured: CGSize = text.isEmpty ? .zero : (text as NSString).boundingRect(with:CGSize(width:300,height:CGFloat.greatestFiniteMagnitude),
+        let measured = (text as NSString).boundingRect(with:CGSize(width:300,height:CGFloat.greatestFiniteMagnitude),
             options:[.usesLineFragmentOrigin,.usesFontLeading],attributes:[.font:font]).size
-        let body = text.isEmpty ? 0 : min(240,ceil(measured.height)) + 12
-        return CGSize(width:max(total > 1 ? 232 : 180,ceil(measured.width)+33), height:14 + (total > 1 ? 24 : 0) + body + 26 + 14)
+        let width = max(total > 1 ? 232 : 180,ceil(measured.width)+34)
+        let height = text.isEmpty ? 0 : min(240,body(text,width:width-32).frame.height) + 12
+        return CGSize(width:width, height:14 + (total > 1 ? 24 : 0) + height + 26 + 14)
     }
     static func bubble(_ card: CGRect, side: NSRectEdge?, tip: CGFloat) -> CGPath {   // flipped coordinates; tip runs along the facing edge
         let p = CGMutablePath(), r: CGFloat = 12, n = notch
@@ -1042,13 +1068,8 @@ final class DrawingCalloutView: NSView {
             let height = card.maxY - 14 - 26 - 12 - y
             let scroll = NSScrollView(frame:CGRect(x:card.minX+16,y:y,width:card.width-32,height:height))
             scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-            let body = NSTextView(frame:CGRect(origin:.zero,size:scroll.contentSize))
-            body.string = text; body.font = Self.font; body.textColor = .white; body.drawsBackground = false
-            body.isEditable = false; body.isSelectable = true; body.textContainerInset = .zero; body.isVerticallyResizable = true
-            body.textContainer?.lineFragmentPadding = 0
-            body.textContainer?.containerSize = NSSize(width:scroll.contentSize.width,height:.greatestFiniteMagnitude)
-            body.textContainer?.widthTracksTextView = true; body.autoresizingMask = [.width]
-            scroll.documentView = body; addSubview(scroll)
+            scroll.scrollerStyle = .overlay
+            scroll.documentView = Self.body(text,width:scroll.contentSize.width); addSubview(scroll)
             y += height + 12
         }
         let last = step >= total
@@ -1099,8 +1120,8 @@ final class ScreenDrawing {
         guard let r = request, let data = try? JSONEncoder().encode(r.steps), let steps = try? JSONSerialization.jsonObject(with:data) else { return nil }
         return ["steps":steps, "shown":index+1]
     }
-    // Readable from a normal distance: about 29 points on a laptop, 32 on a 1080p monitor; s and l scale it.
-    static func textSize(_ size: String?, display: CGRect) -> CGFloat { max(22,min(40,display.height/34)) * (["s":0.75,"l":1.4][size ?? ""] ?? 1) }
+    // Keep board text readable without oversized type on large displays.
+    static func textSize(_ size: String?, display: CGRect) -> CGFloat { min(32,max(22,min(28,display.height/40)) * (["s":0.8,"l":1.2][size ?? ""] ?? 1)) }
     // Every text line of the guide on one panel, laid out once so it grows in place: at the first line's `at`, else beside the other marks.
     static let colors: [String:NSColor] = ["red":.systemRed, "blue":.systemBlue, "green":.systemGreen, "yellow":.systemYellow, "white":.white]
     static func board(_ steps: [DrawingStep], near: CGRect) -> (frame: CGRect, pad: CGFloat, lines: [BoardLine])? {
@@ -1871,7 +1892,7 @@ final class App: NSObject, WKScriptMessageHandler {
         let b = p.y < 6 || (p.y < c && (p.x < c || p.x > w - c)), t = p.y > h - 6 || (p.y > h - c && (p.x < c || p.x > w - c))
         return l || r || t || b ? (l, r, t, b) : nil
     }
-    func overX(_ p: NSPoint) -> Bool { p.x > panel.frame.width - 42 && p.y > panel.frame.height - 42 }
+    func overX(_ p: NSPoint) -> Bool { !pillOn && p.x > panel.frame.width - 42 && p.y > panel.frame.height - 42 }   // the pill has no ✕ corner: its own buttons sit there
     // Words the recognizer should expect: the user's app names plus a few of the user's own (free, on-device).
     var hints: [String] {
         let config = (Prefs.path as NSString).deletingLastPathComponent
@@ -1887,11 +1908,11 @@ final class App: NSObject, WKScriptMessageHandler {
     let drawing = ScreenDrawing()
     var drawingReply = false
     var pointContext: [String:Any]?
-    var voice: Process?   // `say`: the Mac's system voice (a Siri voice if picked in Spoken Content); AVSpeechSynthesizer can't use Siri voices
+    var voice: Process?   // `say`, with a validated installed voice
     func voiceQualityTip() {
         guard !UserDefaults.standard.bool(forKey: "voiceQualityTip") else { return }
         UserDefaults.standard.set(true, forKey: "voiceQualityTip")
-        show(); js("notice", "Voice sounds robotic? This Mac has no natural voice yet. Get one: System Settings → Accessibility → Read & Speak → System voice → Manage Voices → download a Siri voice, then pick it as the System voice."); hide(after: 14)
+        show(); js("notice", "Voice sounds robotic? This Mac has no natural voice yet. Get one: System Settings → Accessibility → Read & Speak → System voice → Manage Voices → download an Enhanced or Premium voice, then pick it as the System voice."); hide(after: 14)
     }
     @discardableResult func shush() -> Bool {
         guard let v = voice else { return false }; voice = nil
@@ -1901,7 +1922,6 @@ final class App: NSObject, WKScriptMessageHandler {
         if Prefs.bool("autoCopy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(a, forType: .string) }
         if Prefs.bool("speak") && aloud {
             let arguments = readAloudArguments(spoken(a)) { voiceQualityTip() }
-            siriVoice()   // retry for next time: this read uses the fallback after a previous Siri test failed
             shush(); let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/say"); p.arguments = arguments
             p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
                 guard let self, self.voice === p else { return }; self.voice = nil; self.hide(after: 2)
@@ -2151,6 +2171,11 @@ final class App: NSObject, WKScriptMessageHandler {
                 }
             }
             if b["dictationHistory"] != nil { hide(after: 0); Jarvis.settings.open(tab: "dictation") }
+            if let i = b["idea"] as? Int, Self.ideas.indices.contains(i) {
+                telemetry(["idea", "clicked", String(i)]); gen += 1; pill(false)
+                pinned = true; panel.makeKey(); panel.makeFirstResponder(web); js("draft", Self.ideas[i])
+            }
+            if b["ideaClose"] != nil { close(clear: false) }
             if let enabled = b["agentDefault"] as? Bool { defaultKey(enabled) }
             if let value = b["miniRect"] as? [String:Any] { mini.layout(value) }
             // a click on the mini screen = the user wants to see it: the focus guard stands aside
@@ -2931,6 +2956,18 @@ final class App: NSObject, WKScriptMessageHandler {
         Jarvis.settings.send("dictation", DictationData.state())
         return true
     }
+    // "Ideas when I'm away": after a day with no ask, one line grows out of the orb, at most once a day; a click puts it in the box.
+    static let ideas = ["Need to research something? Just ask.", "Want me to tidy these windows?", "Got an email to write?", "Turn a photo into a PNG?",
+                        "Want a quick summary of this page?", "Need a reminder for later?", "Stuck on a formula? I can explain it.", "Looking for a file? I can find it.",
+                        "Planning a trip? I can compare options.", "Want some music on?", "Got a long text to shorten?", "Need a word that fits better?"]
+    static func ideaDue(now: Date, lastAsk: Date, lastShown: Date, on: Bool) -> Bool {
+        on && now.timeIntervalSince(lastAsk) >= 86400 && now.timeIntervalSince(lastShown) >= 86400
+    }
+    func idea(_ i: Int) {
+        js("reset"); try? FileManager.default.removeItem(atPath: recent)   // a day later: a fresh box, like the next shortcut press
+        pill(true); show(); js("idea", [i, Self.ideas[i]]); hide(after: 8)
+        telemetry(["idea", "shown", String(i)])
+    }
     // No readable field: the next keys in that app, held in memory only, for 20 s; a click, secure input or another app ends it.
     var editKeys: Any?, replayIdle: Timer?
     func replayEdits(_ value: String, app: NSRunningApplication) {
@@ -3206,8 +3243,7 @@ final class App: NSObject, WKScriptMessageHandler {
         busy = false; guardUntil = Date().addingTimeInterval(2); unwarm()   // nothing left for the AI; an app an instant command started can still jump forward
         if did.isEmpty { js("msg", ""); return hide(after: 0.2) }   // nothing heard: end quietly, no error line
         answer = "✓ " + did.joined(separator: " ")
-        deliver(did.joined(separator: " "))
-        js("line", answer); lastDone = Date(); cue("soundDone"); hide(after: linger(5))
+        js("line", answer); deliver(did.joined(separator: " ")); lastDone = Date(); cue("soundDone"); hide(after: linger(5))
     }
 
     // jarvis.py --wait, started at key-down so Claude is up by the time the user lets go; run() hands it the words.
@@ -3224,7 +3260,7 @@ final class App: NSObject, WKScriptMessageHandler {
                 buffer += d
                 while let i = buffer.firstIndex(of: 10) {
                     let line = String(decoding: buffer[..<i], as: UTF8.self); buffer.removeSubrange(...i)
-                    if line == "! setup" { onboarding.open(); continue }   // Claude not installed, signed out or no plan
+                    if line == "! setup" { onboarding.open(automatic: true); continue }   // Claude not installed, signed out or no plan
                     if line == "! feedback" { Jarvis.settings.open(tab:"feedback"); continue }
                     if line == "! improve" { self.js("improve"); continue }   // the one-time "help make Jarvis better?" card
                     if line.hasPrefix("▣ "), let value = try? JSONSerialization.jsonObject(with:Data(line.dropFirst(2).utf8)) as? [String:Any] { if Prefs.d["miniScreen"] as? Bool ?? true { self.mini.receive(value) }; continue }
@@ -3284,8 +3320,8 @@ final class App: NSObject, WKScriptMessageHandler {
                     if line.hasPrefix("✓") {
                         let result = self.replacement.flatMap { $0.isEmpty ? nil : $0 } ?? line.dropFirst(2).replacingOccurrences(of: "\u{2028}", with: "\n")
                         let finish = self.drawing.request?.steps.count == 1 ? "Done. It’s on your screen." : "Done. Steps are on screen."
-                        self.mini.finish(); self.answer = "✓ " + (guided ? finish : result); self.deliver(guided ? finish : result, aloud: !guided)   // a guide's steps speak for themselves
-                        self.js("line", self.answer); continue
+                        self.mini.finish(); self.answer = "✓ " + (guided ? finish : result); self.js("line", self.answer)
+                        self.deliver(guided ? finish : result, aloud: !guided); continue   // after the line: finding the read-aloud voice must not delay the answer; a guide's steps speak for themselves
                     }
                     if line.hasPrefix("! ") { self.js("msg", String(line.dropFirst(2))) }
                     else { self.js("line", line) }
@@ -3894,11 +3930,13 @@ final class RoutineWake {
 // Shows until finished once; to see it again: defaults delete com.jarvis.app onboarded, then restart the app.
 final class Onboarding: NSObject, WKScriptMessageHandler, NSWindowDelegate {
     var win: NSWindow?, web: WKWebView?, timer: Timer?
-    var checkingPlan = false
+    var checkingPlan = false, setupShown = false
     var screenInitiallyGranted = false, screenGrantedDuringSetup = false
     let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_"
 
-    func open() {
+    func open(automatic: Bool = false) {
+        if automatic && setupShown { return }
+        setupShown = true   // closing setup is a choice; repeated failed asks must not reopen it
         guard win == nil else { win?.makeKeyAndOrderFront(nil); return }
         screenInitiallyGranted = CGPreflightScreenCaptureAccess(); screenGrantedDuringSetup = false
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 640),
@@ -3910,6 +3948,9 @@ final class Onboarding: NSObject, WKScriptMessageHandler, NSWindowDelegate {
         bg.material = .underWindowBackground; bg.blendingMode = .behindWindow; bg.state = .active
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(self, name: "ob")
+        if automatic {   // a sign-in or install problem opens at the Claude row, not the welcome
+            cfg.userContentController.addUserScript(WKUserScript(source: "window.obStart = 'perms'", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
         let v = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 612), configuration: cfg)   // top 28 pt stays draggable
         v.setValue(false, forKey: "drawsBackground")
         loadPage(v, "onboarding.html")
@@ -3972,6 +4013,7 @@ final class Onboarding: NSObject, WKScriptMessageHandler, NSWindowDelegate {
         Onboarding.plan { [weak self] c in
             let need = c["need"] as? String ?? ""
             let devin = (c["client"] as? String) == "devin", pi = (c["client"] as? String) == "pi", server = (c["client"] as? String) == "server"
+            if need.isEmpty, c["ok"] as? Bool == false { Jarvis.settings.open(); return }
             if need == "upgrade" { NSWorkspace.shared.open(URL(string: "https://claude.ai/upgrade")!); return }
             let cmd = need == "install"
                 ? devin ? "curl -fsSL https://cli.devin.ai/install.sh | bash && devin auth login"
@@ -4619,7 +4661,7 @@ final class SettingsWindow: NSObject, WKScriptMessageHandler, WKNavigationDelega
         send("agents", ["count": agentsUI.count])
         send("dictation", DictationData.state())
         js("st.motion(\(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion))")
-        var d: [String: Any] = ["prefs": Prefs.d, "mics": microphoneChoices(), "version": Updater.version, "update": Updater.status, "managedUpdates": Updater.managedByNix,
+        var d: [String: Any] = ["prefs": Prefs.d, "mics": microphoneChoices(), "version": Updater.version, "update": Updater.status, "managedUpdates": Updater.managedByNix, "sharingUnavailable": ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27,
                                 "hotkeyTaken": !hotkeyRegistered, "dictateHotkeyTaken": !Prefs.str("dictateHotkeyLabel").isEmpty && !dictateHotkeyRegistered, "globeTaken": globeKeyTaken()]
         let routines = (Prefs.path as NSString).deletingLastPathComponent + "/routines.json"
         d["routines"] = (try? JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:routines)))) as? [[String:Any]] ?? []
@@ -4779,7 +4821,7 @@ final class SettingsWindow: NSObject, WKScriptMessageHandler, WKNavigationDelega
         }
         if k == "speechModel" { app.prepareSpeech() }
         if k == "improve" { Prefs.set("improveAsked", true) }   // any answer, here or in setup or the card, is the answer
-        if k == "speak" { if v as? Bool == true { siriVoice() } else { app.shush() } }
+        if k == "speak", v as? Bool == false { app.shush() }
         if k == "hideWhenSharing" { NSApp.windows.forEach(applySharing) }
         if k == "menuIcon" { bar.item.isVisible = v as? Bool == true }
         if k == "paused" { if v as? Bool == true { meeting.stop(paused: true); app.close(clear: false); agentsUI.stopAll() }; bar.paint() }
@@ -7213,7 +7255,6 @@ func showNudge(_ info: [String: Any]) {
     DispatchQueue.main.asyncAfter(deadline: .now() + 45) { if meeting.generation == g && !meeting.running && meeting.nudge != nil { meeting.discard() } }
 }
 Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in checkCalendar() }
-
 // "Notice when you're in a call": a call app holding the mic for 3 s gets one card per call (like Granola's "Meeting detected").
 // Dictation apps (Wispr Flow, Jarvis itself) aren't call apps, and a short debounce skips transient mic use. Browser helpers share the browser's prefix.
 let callApps = ["us.zoom.xos": "Zoom", "com.microsoft.teams": "Teams", "com.apple.FaceTime": "FaceTime", "com.tinyspeck.slackmacgap": "Slack",
@@ -7251,7 +7292,25 @@ let agentsUI = AgentPanels()
 let routineWake = RoutineWake()
 let onboarding = Onboarding()
 if !UserDefaults.standard.bool(forKey: "onboarded") { DispatchQueue.main.async { onboarding.open() } }
-else { Onboarding.plan { c in if c["ok"] as? Bool != true { onboarding.open() } } }   // set up once, but Claude signed out since
+else { Onboarding.plan { c in if c["ok"] as? Bool != true { onboarding.open(automatic: true) } } }   // set up once, but Claude signed out since
+// An idea only while the user is at the Mac and nothing else wants them: no call, sharing, full-screen app, setup, or Jarvis in use.
+let launched = Date()
+func checkIdea() {
+    let log = (Prefs.path as NSString).deletingLastPathComponent + "/log.jsonl"   // every ask appends a row
+    let asked = (try? FileManager.default.attributesOfItem(atPath: log)[.modificationDate] as? Date) ?? launched
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let fullScreen = { (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []).contains { w in
+        w[kCGWindowOwnerPID as String] as? pid_t == front && w[kCGWindowLayer as String] as? Int == 0 &&
+            NSScreen.screens.contains { (w[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }?.size == $0.frame.size }
+    } }
+    guard App.ideaDue(now: Date(), lastAsk: asked, lastShown: Date(timeIntervalSince1970: Prefs.num("ideaAt")), on: Prefs.bool("comeBack") && !Prefs.bool("paused")),
+          CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!) < 60,
+          !NSApp.isActive, !app.panel.isVisible, !app.busy, !app.engine.isRunning, !app.dictating, onboarding.win == nil,
+          !agentsUI.quiet, meeting.panel == nil, callAppsOnMic().isEmpty, !fullScreen() else { return }
+    let n = Int(Prefs.num("ideaN")); Prefs.set("ideaN", n + 1); Prefs.set("ideaAt", Date().timeIntervalSince1970)
+    app.idea(n % App.ideas.count)   // in order, so none repeats before the list is used up
+}
+Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in checkIdea() }
 var specs = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
              EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
 InstallEventHandler(GetApplicationEventTarget(), { _, ev, _ in
@@ -7338,7 +7397,6 @@ var pasteRef: EventHotKeyRef?
 let pasteHotkey = (code: 9, mods: controlKey | cmdKey, flags: NSEvent.ModifierFlags([.control, .command]))
 let pasteHotkeyRegistered = !hotkeysConflict(pasteHotkey, hotkey()) && (Prefs.str("dictateHotkeyLabel").isEmpty || !hotkeysConflict(pasteHotkey, dictateHotkey())) &&
     RegisterEventHotKey(UInt32(pasteHotkey.code), UInt32(pasteHotkey.mods), EventHotKeyID(signature: 0x4A525653, id: 7), GetApplicationEventTarget(), 0, &pasteRef) == noErr
-if Prefs.bool("speak") { siriVoice() }
 let settings = SettingsWindow()
 let bar = MenuBar()
 let delegate = Delegate()

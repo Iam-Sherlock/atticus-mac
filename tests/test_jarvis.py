@@ -39,6 +39,17 @@ class BrainTests(unittest.TestCase):
             self.assertEqual({env[f'ANTHROPIC_DEFAULT_{m}_MODEL'] for m in ('HAIKU', 'SONNET', 'OPUS')}, {'deepseek-chat'})
             self.assertEqual(jarvis.plan(), {'ok': True, 'need': '', 'text': 'Using your custom server, api.deepseek.com.', 'client': 'server'})
 
+    def test_unlaunchable_claude_is_setup_instead_of_a_crash(self):
+        with patch.object(jarvis, 'start_claude', return_value=None), \
+             patch.object(jarvis.subprocess, 'run', side_effect=PermissionError(13, 'private path')), \
+             patch.object(jarvis, 'say'), patch.object(jarvis, 'report_error') as error:
+            reply, steps, commands = jarvis.run('fixture')
+            self.assertIn('Could not start Claude Code', reply)
+            self.assertNotIn('private path', reply)
+            self.assertEqual((steps, commands, jarvis.run.why), (0, [], 'setup_needed'))
+            jarvis.report_worker_failure('claude', 'haiku', jarvis.run.why)
+            error.assert_called_once_with('setup', worker='claude', model='haiku', why='setup_needed')
+
     def test_custom_server_models_come_from_the_server(self):
         from http.server import BaseHTTPRequestHandler, HTTPServer
         class Fake(BaseHTTPRequestHandler):   # DeepSeek-style: the Claude address ends in /anthropic, the list is at /models
@@ -170,6 +181,26 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
             reply, _, _ = jarvis.run('Request: hello', jarvis.start_claude())
         self.assertEqual(reply, 'Your custom server rejected its credentials. Check its key in Settings.')
         self.assertFalse(any(call.args[:2] == ('!', 'setup') for call in say.call_args_list))
+
+    def test_custom_server_retries_an_image_rejection_without_images(self):
+        class Input(io.StringIO):
+            def close(self): pass
+        def worker(result, failed):
+            p = unittest.mock.Mock(ask='', returncode=int(failed), errors=io.StringIO(), jarvis_model='haiku')
+            p.stdin = Input()
+            p.stdout = [json.dumps({'type': 'result', 'result': result, 'is_error': failed, 'total_cost_usd': 0})]
+            return p
+        shot = self.root / 'screen.jpg'
+        shot.write_bytes(b'fixture')
+        first = worker('API Error: 400 Multimodal data provided, but model does not support multimodal requests.', True)
+        retry = worker('Done without the picture.', False)
+        with patch.object(jarvis, 'server', return_value={'ANTHROPIC_BASE_URL': 'fixture'}), \
+             patch.object(jarvis, 'start_claude', return_value=retry) as start, patch.object(jarvis, 'say'):
+            reply, _, _ = jarvis.run('Arrange the windows', first, [(str(shot), 'Screen 1')])
+        start.assert_called_once_with('haiku')
+        self.assertEqual(reply, 'Done without the picture.')
+        self.assertIn('image', [b['type'] for b in json.loads(first.stdin.getvalue())['message']['content']])
+        self.assertNotIn('image', [b['type'] for b in json.loads(retry.stdin.getvalue())['message']['content']])
 
     def test_routing_migrates_legacy_choices_and_honors_one_mode(self):
         cases = [({}, 'balanced'), ({'escalate': False}, 'cheapest'),
@@ -402,6 +433,30 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
                 self.assertEqual(log.call_args.args[1],said)
                 self.assertEqual(log.call_args.kwargs['attempt_usd'],[.001])
                 learn.assert_not_called()
+
+    def test_plan_and_context_limits_do_not_continue_on_a_bigger_model(self):
+        for why, runs in (('plan_limit', 1), ('too_long', 1), ('rate_limited', 2)):
+            with self.subTest(why=why):
+                brain, start, _, _ = self.routing_ask({'routing': 'balanced'}, [('Stopped.', False, ['inspect']), ('Done.', True, ['verify'])], why=why)
+                self.assertEqual(brain.call_count, runs)
+
+    def test_plan_limits_skip_the_retry_card(self):
+        for why, offered in (('plan_limit', False), ('too_long', False), ('provider_needed', False), ('outdated', False), ('rate_limited', True), ('stopped', True)):
+            with self.subTest(why=why):
+                brain = unittest.mock.Mock(return_value=('Claude: You’ve hit your weekly limit · resets 3pm', 0, []))
+                brain.ok = False; brain.cmds = brain.ran = brain.observed = []; brain.handoff = None; brain.handoffs = []; brain.work = False; brain.why = why
+                with patch.multiple(jarvis, ping=lambda: None, fast=lambda _: None,
+                                    front=lambda: ('Fixture', 'Scratch'), osa=lambda *a: '', screens=lambda: [],
+                                    selection_context=lambda: '', relevant_rules=lambda _: '', recent=lambda: [],
+                                    workflows=lambda *a: '', screen_for=lambda *a: None, wait_commit=lambda: True,
+                                    run=brain, start_ai=lambda *a: None, remember_turn=lambda *a: None), \
+                     patch.object(jarvis, 'ask_user', return_value=None) as card, patch.object(jarvis, 'log_turn'), \
+                     patch.object(jarvis.threading, 'Thread'), patch.dict(os.environ, {'JARVIS_UI': '1', 'JARVIS_ASK': jarvis.DIR}), \
+                     patch('sys.argv', ['jarvis.py', 'Fixture task']), patch('sys.stdout', io.StringIO()) as out:
+                    jarvis.main()
+                self.assertEqual(card.called, offered)
+                if why == 'rate_limited': self.assertEqual(card.call_args[0][0]['cmd'], brain.return_value[0])   # the card says why
+                self.assertIn('weekly limit', out.getvalue())
 
     def test_partial_request_handoff_keeps_one_original_log_row(self):
         brain=unittest.mock.Mock(return_value=('',None,[]));brain.handoff={'accepted':True};brain.handoffs=[brain.handoff];brain.ran=[];brain.ok=True
@@ -924,8 +979,48 @@ print('Ready.')
              python_fixture_cli():
             reply, _, _ = jarvis.run_pi('test')
         say.assert_called_with('!', 'setup')
-        self.assertEqual(reply, 'Pi needs a provider and model. Jarvis setup is open to fix it.')
+        self.assertEqual(reply, 'Pi needs a provider and model. Open Jarvis Settings, choose Set Up, then try again.')
         self.assertEqual(jarvis.run.why, 'provider_needed')
+
+    def test_pi_json_errors_are_failures_even_when_the_cli_exits_zero(self):
+        from types import SimpleNamespace
+        cases = [
+            ('error', '401 credentials expired', '', 'signed_out', True, 'choose Set Up'),
+            ('error', '429 usage limit reached', '', 'plan_limit', False, 'after the limit resets'),
+            ('error', '429 too many requests', '', 'rate_limited', False, 'try again in a moment'),
+            ('error', 'Prompt is too long', '', 'too_long', False, 'Close this box with ✕ to start fresh'),
+            ('error', 'Unknown provider model', '', 'provider_needed', True, 'Pi needs a provider and model'),
+            ('error', 'Service rejected request', '', 'stopped', True, 'choose Set Up'),
+            ('error', 'Service unavailable', '', 'unavailable', False, 'temporarily unavailable'),
+            ('error', 'Error: Unknown option: --no-mcp', '', 'outdated', False, 'Update Pi, then try again.'),
+            ('aborted', 'Request aborted', '', 'cancelled', False, 'cancelled'),
+            ('stop', '', 'Network connection failed', 'offline', False, 'Check your internet connection'),
+            ('stop', '', '', 'no_reply', False, 'empty answer'),
+        ]
+        for reason, detail, stderr, why, opens_setup, guidance in cases:
+            with self.subTest(reason=reason, detail=detail, stderr=stderr):
+                message = {'role': 'assistant', 'stopReason': reason, 'errorMessage': detail,
+                           'content': [{'type': 'text', 'text': 'Partial answer'}] if reason == 'error' else []}
+                def spawn(args, **kwargs):
+                    kwargs['stderr'].write(stderr)
+                    return SimpleNamespace(stdout=io.StringIO(json.dumps({'type': 'message_end', 'message': message}) + '\n'),
+                                           returncode=0, wait=lambda: 0, poll=lambda: 0)
+                jarvis.run.why = ''
+                with patch.object(jarvis.shutil, 'which', return_value='/fixture/pi'), \
+                     patch.object(jarvis, 'wait_commit', return_value=True), patch.object(jarvis, 'say') as say, \
+                     patch.object(jarvis, 'relay'), patch.object(jarvis.signal, 'signal'), \
+                     patch.object(jarvis.atexit, 'register'), patch.object(jarvis.subprocess, 'Popen', side_effect=spawn), \
+                     patch.object(jarvis, 'read_rows', return_value=[{'tool': 'exec', 'input': {'command': 'echo fixture'}}]):
+                    reply, _, _ = jarvis.run_pi('fixture request')
+                self.assertFalse(jarvis.run.ok)
+                self.assertEqual(jarvis.run.cmds, [])
+                self.assertEqual(jarvis.run.why, why)
+                self.assertIn(guidance, reply)
+                if opens_setup: say.assert_called_once_with('!', 'setup')
+                else: say.assert_not_called()
+                if (reason == 'error' or stderr) and why not in ('signed_out', 'provider_needed', 'too_long', 'outdated'):
+                    self.assertIn(detail or stderr, reply)
+                    self.assertNotIn('empty answer', reply)
 
     def test_pi_ignores_malformed_events_and_uses_json_mode_images_and_jarvis_gate(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1074,8 +1169,9 @@ print(json.dumps({{'type':'message_end','message':{{'role':'assistant','content'
         self.assertLessEqual(max(naps), .02)
 
     def test_allow_answer_is_picked_up_quickly(self):
-        naps = []
+        naps, me, sleep = [], threading.current_thread(), time.sleep
         def nap(secs):
+            if threading.current_thread() is not me: return sleep(secs)   # time.sleep is process-wide: a thread an earlier test left running is not this wait
             naps.append(secs)
             Path(json.loads(Path(jarvis.question_path(self.root)).read_text())['_a']).write_text('y')   # the user clicks Allow
         with patch.dict(os.environ, {'JARVIS_ASK': str(self.root)}), patch.object(jarvis.time, 'sleep', side_effect=nap):
@@ -1298,7 +1394,7 @@ print(json.dumps({{'type':'message_end','message':{{'role':'assistant','content'
                 self.assertEqual(args[args.index('--model')+1],expected)
 
     def test_stream_requires_a_real_terminal_answer(self):
-        for stream, expected in [([], 'Claude’s helper exited without returning a result. Jarvis setup is open; choose Set Up, then try again.'),
+        for stream, expected in [([], 'Claude’s helper exited without returning a result. Open Jarvis Settings, choose Set Up, then try again.'),
                                  ([{'type': 'result', 'result': ''}], 'Claude returned an empty answer. Please try again.'),
                                  ([{'type': 'result', 'result': 'Found it.', 'total_cost_usd': .001}], 'Found it.')]:
             p = unittest.mock.Mock()
@@ -1471,7 +1567,7 @@ print(json.dumps({{'type':'message_end','message':{{'role':'assistant','content'
                     reply, _, _ = jarvis.run('test', p)
                 if is_error and text == error:
                     self.assertEqual(say.call_args_list.count(unittest.mock.call('!', 'setup')), 1)
-                    self.assertEqual(reply, 'Your Claude sign-in expired. Jarvis setup is open to sign in again.')
+                    self.assertEqual(reply, 'Your Claude sign-in expired. Open Jarvis Settings to sign in again.')
                     self.assertFalse(jarvis.run.ok)
                 elif is_error:
                     self.assertIn('temporarily unavailable', reply)
@@ -1498,6 +1594,42 @@ print(json.dumps({{'type':'message_end','message':{{'role':'assistant','content'
                 self.assertNotIn(detail, reply)
                 self.assertNotIn('/private/fixture', reply)
                 self.assertNotIn('abcdefghijklmnopqrstuvwxyz123456', jarvis.run.error)
+
+    def test_plan_limits_show_claudes_own_words_instead_of_setup(self):
+        resets = time.strftime(' · resets %a %-I:%M %p', time.localtime(1760000000))
+        for detail, shown in (('You’ve hit your weekly limit · resets 3pm', 'You’ve hit your weekly limit · resets 3pm'),
+                              ('Opus limit reached, try Sonnet', 'Opus limit reached, try Sonnet'),
+                              ('You’ve reached your usage limit. /upgrade to keep going', 'You’ve reached your usage limit. /upgrade to keep going'),
+                              ('Claude AI usage limit reached|1760000000', 'Claude AI usage limit reached' + resets)):
+            with self.subTest(detail=detail):
+                p = unittest.mock.Mock()
+                p.stdin = io.StringIO(); p.ask = ''; p.returncode = 0; p.errors = io.StringIO()
+                p.stdout = [json.dumps({'type': 'result', 'is_error': True, 'result': detail})]
+                with patch.object(jarvis, 'say') as say:
+                    reply, _, _ = jarvis.run('test', p)
+                self.assertEqual((reply, jarvis.run.why), ('Claude: ' + shown, 'plan_limit'))
+                self.assertNotIn(unittest.mock.call('!', 'setup'), say.call_args_list)
+
+    def test_context_limits_say_the_request_is_too_long_without_setup(self):
+        for detail in ('Context window limit reached', 'The context token limit has been reached', 'context-limit reached',
+                       'Prompt is too long', 'Context limit reached · /compact or /clear to continue'):
+            with self.subTest(detail=detail):
+                p = unittest.mock.Mock()
+                p.stdin = io.StringIO(); p.ask = ''; p.returncode = 0; p.errors = io.StringIO()
+                p.stdout = [json.dumps({'type': 'result', 'is_error': True, 'result': detail})]
+                with patch.object(jarvis, 'say') as say:
+                    reply, _, _ = jarvis.run('test', p)
+                self.assertEqual((reply, jarvis.run.why), ('This request is too long for Claude. Close this box with ✕ to start fresh, then ask again with less text.', 'too_long'))
+                self.assertNotIn(unittest.mock.call('!', 'setup'), say.call_args_list)
+
+    def test_an_unknown_cli_option_asks_to_update_claude_code_without_setup(self):
+        p = unittest.mock.Mock()
+        p.stdin = io.StringIO(); p.ask = ''; p.returncode = 0; p.errors = io.StringIO()
+        p.stdout = [json.dumps({'type': 'result', 'is_error': True, 'result': 'Error: Unknown option: --no-mcp'})]
+        with patch.object(jarvis, 'say') as say:
+            reply, _, _ = jarvis.run('test', p)
+        self.assertEqual((reply, jarvis.run.why), ('Claude Code needs an update. Open Terminal, run claude update, then try again.', 'outdated'))
+        self.assertNotIn(unittest.mock.call('!', 'setup'), say.call_args_list)
 
     def test_terminal_error_text_uses_friendly_mapping_and_copy_details(self):
         for detail, expected in [('HTTP 429 rate limit exceeded', 'rate-limited'),
@@ -1784,15 +1916,25 @@ class WatchAndBudgetTests(unittest.TestCase):
         with patch.dict(os.environ, {'JARVIS_ASK': '/fake'}), patch.object(jarvis, 'ask_user') as ask, patch('sys.stdout', new_callable=io.StringIO):
             jarvis.set_switch('safe mode', 'on')
         self.assertEqual(ask.call_args.args[0], {'set': 'safe', 'value': True})
-        for words, key in [('the drawing setting', 'draw'), ('read answers aloud', 'speak'), ('safe mode', None)]:
-            with patch.dict(os.environ, {'JARVIS_ASK': '/fake'}), patch.object(jarvis, 'ask_user') as ask, patch('sys.stdout', new_callable=io.StringIO):
+        for words, key in [('the drawing setting', 'draw'), ('read answers aloud', 'speak'), ('voice', 'speak'), ('safe mode', None)]:
+            with patch.dict(os.environ, {'JARVIS_ASK': '/fake'}), patch.object(jarvis, 'ask_user') as ask, \
+                 patch.object(jarvis.subprocess, 'run'), patch('sys.stdout', new_callable=io.StringIO):
                 jarvis.set_switch(words, 'off')
             self.assertEqual(ask.call_args.args[0] if ask.called else None, key and {'set': key, 'value': False})
-        with patch.dict(os.environ, {'JARVIS_ASK': '/fake'}), patch.object(jarvis, 'ask_user') as ask, \
+        with patch.dict(os.environ, {'JARVIS_ASK': '/fake'}), patch.object(jarvis, 'ask_user') as ask, patch.object(jarvis.subprocess, 'run'), \
              patch('sys.stdout', new_callable=io.StringIO) as out:
             jarvis.set_switch('AI client', 'devin')
         ask.assert_not_called()
-        self.assertIn('Only the user', out.getvalue())
+        self.assertIn('Only you', out.getvalue())
+
+    def test_unavailable_voice_setting_opens_settings(self):
+        with patch.object(jarvis.subprocess, 'run') as opened, patch.object(jarvis, 'ask_user') as ask, \
+             patch('sys.stdout', new_callable=io.StringIO) as out:
+            jarvis.set_switch('key binding', 'off')
+        ask.assert_not_called()
+        opened.assert_called_once_with(['open', '-a', 'Jarvis'], capture_output=True)
+        self.assertIn('Jarvis Settings is open; change it there', out.getvalue())
+        self.assertIn('Unsupported: open -a Jarvis; say change it there', jarvis.SYSTEM)
 
     def test_unknown_command_never_shows_raw_shell(self):
         self.assertEqual(jarvis.label('Bash', {'command': 'cat > /private/var/folders/x/prompt.txt <<EOF'}), 'Working on it')

@@ -24,7 +24,8 @@
   #status.live span { background: linear-gradient(90deg, var(--fg2) 0%, #fff 45%, var(--fg2) 90%); background-size: 200% 100%;
     -webkit-background-clip: text; color: transparent; animation: in .35s var(--ease) both, shimmer 1.5s linear infinite; }
 
-  #thread { container-type: inline-size; max-height: 420px; min-height: 0; overflow-y: auto; scroll-behavior: smooth; padding-top: 2px;
+  /* Automatic following must be immediate: repeated live updates keep restarting a smooth scroll below the current turn. */
+  #thread { container-type: inline-size; max-height: 420px; min-height: 0; overflow-y: auto; padding-top: 2px;
     -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 100%); }
   #thread::-webkit-scrollbar { width: 0; }
   #thread:empty { display: none; }
@@ -72,6 +73,8 @@
     font-size: 12px; line-height: 16px; color: #f5f5f7; animation: fade .25s var(--ease) both; }
   .dn button { border:0; border-radius:6px; padding:3px 8px; font:inherit; color:var(--fg2); background:none; text-decoration:underline; cursor:pointer; flex:none; }
   .dn button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .dn .idea { padding:0; color:inherit; text-decoration:none; text-align:left; } .dn .ideax { display:grid; place-items:center; width:20px; height:20px; padding:0; }
+  .dn .ideax svg { width:8px; height:8px; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; }
   .dn.tick { animation: in .25s var(--ease) both; }
   .dn.tick::before { content: ""; flex: none; width: 8px; height: 4px; border-left: 1.5px solid #30d158; border-bottom: 1.5px solid #30d158; transform: translateY(-1px) rotate(-45deg); }
 
@@ -669,7 +672,7 @@
   new ResizeObserver(miniRect).observe($('thread'));
 
   let clockStart = null, clockHeld = null, clockFrame = 0, clock = null;   // clockHeld: ms so far while a card waits for the user
-  const clockPaint = () => { const t = (performance.now() - clockStart) / 1000; clock.querySelector('b').textContent = t < 60 ? t.toFixed(2) + ' s' : Math.floor(t / 60) + ':' + (t % 60).toFixed(2).padStart(5, '0'); };   // past a minute, stopwatch style: 4:01.27
+  const clockPaint = () => { const t = (performance.now() - clockStart) / 1000; clock.querySelector('b').firstChild.data = t < 60 ? t.toFixed(2) + ' s' : Math.floor(t / 60) + ':' + (t % 60).toFixed(2).padStart(5, '0'); };   // past a minute, stopwatch style: 4:01.27
   const clockTick = () => {
     if (clockStart === null) return;
     clockPaint();
@@ -682,7 +685,7 @@
     if (clockStart !== null || clockHeld !== null || !turn()) return;
     clock = document.createElement('div'); clock.className = 'elapsed';
     clock.title = 'Time Jarvis spent working. Waiting for your pick or approval is not counted.';
-    clock.innerHTML = '<b></b>';
+    clock.innerHTML = '<b>0.00 s</b>';
     turn().append(clock); clockStart = performance.now(); clockTick();
   };
 
@@ -889,17 +892,23 @@
       button.onclick = () => { button.disabled = true; post({ learnedUndo: true }); };
       pill('said', `Learned “${word}”`, true).append(' ', button); fit(false);
     },
+    idea([i, text]) {   // "Ideas when I'm away": the pill grows into one line; click it to ask, ✕ lets it go
+      const go = document.createElement('button'); go.className = 'idea'; go.textContent = text; go.onclick = () => post({ idea: i });
+      const x = document.createElement('button'); x.className = 'ideax'; x.setAttribute('aria-label', 'Close'); x.innerHTML = $('x').innerHTML; x.onclick = () => post({ ideaClose: true });
+      pill('said').append(go, x); fit(false);
+    },
     line(l) {
       const tag = l[0], s = l.slice(2);
       let top = null;   // a streamed answer: the box keeps its start in view and never chases the bottom
       if (tag !== '…' && tag !== '✓') unstream();
       if (tag === '…') {   // the answer as it arrives; ✓ replaces it
-        const a = part('a'); if (a && !a.dataset.answer) { if (!s) unstream(); else { reveal(a, shut(s.replace(/\u2028/g, '\n').replace(/\S+$/, '')), a.classList.contains('streaming')); a.classList.add('streaming'); top = a; } }   // its last word may still be arriving
+        const a = part('a'); if (a && !a.dataset.answer) { clockBegin(); if (!s) unstream(); else { reveal(a, shut(s.replace(/\u2028/g, '\n').replace(/\S+$/, '')), a.classList.contains('streaming')); a.classList.add('streaming'); top = a; } }   // its last word may still be arriving
       }
       else if (tag === '▣') { try { miniUpdate(JSON.parse(s)); } catch {} }
       else if (tag === '@') miniPoint(s);
       else if (tag === '·') status(s, true);
       else if (tag === '▸') {
+        clockBegin();   // speculative and instant work can arrive before native calls think()
         settle();
         const st = part('steps'), last = st.lastElementChild, verb = t => t.split(/[\s→]/)[0];
         if (last?.classList.contains('step') && verb(last.textContent) === verb(s)) { last.classList.add('live'); last.firstChild.textContent = s; }   // the same kind of step again (scroll, scroll): one row that updates, not a list
@@ -970,7 +979,7 @@
     compose(on) { comp(on, on); },
     draft(t) { $('ask').value = t; comp(true, true); },
     tap([x, y]) {   // a click on the box, not a drag: on the answer = copy it, anywhere else = type
-      const el = document.elementFromPoint(x, y), b = el?.closest('a[href], .ok button, .ok, .pk button, .pk, .rewrite button, .mini-view, .mem-i, .mem-h, .mem, .shot, #pointbar button, .redo, #agents-pill, .dn button');
+      const el = document.elementFromPoint(x, y), b = el?.closest('a[href], .ok button, .ok, .pk button, .pk, .rewrite button, .mini-view, .mem-i, .mem-h, .mem, .shot, #pointbar button, .redo, #agents-pill, .dn button, .tip .support');
       const field = el?.closest('.ok input, .ok textarea, .pk input, .pk textarea');   // "Something else…": a text field in a card takes the cursor
       if (field) return field.focus();
       if (b) return b.click();
