@@ -20,9 +20,8 @@ license
 !LICENSE
 app.err
 
-# GitHub holds just the app. Agent instructions, skills and the website stay on this Mac.
+# CLAUDE.md is tracked: it carries the project guide between machines. Personal agent settings, skills and the website stay on this Mac.
 AGENTS.md
-CLAUDE.md
 AGENTS.local.md
 CLAUDE.local.md
 .agents/
