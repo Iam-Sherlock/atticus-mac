@@ -1,5 +1,5 @@
 {
-  description = "Atticus: macOS voice and AI assistant";
+  description = "Jarvis: macOS voice and AI assistant";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -38,7 +38,7 @@
           pkgs = pkgsFor system;
         in
         pkgs.writeShellApplication {
-          name = "atticus";
+          name = "jarvis";
           runtimeInputs = [ pkgs.python313 ];
           text = ''
             set -euo pipefail
@@ -48,24 +48,24 @@
                 exec bash "$src/build.sh"
                 ;;
               --check)
-                python3 -c 'import pathlib, sys; compile(pathlib.Path(sys.argv[1]).read_text(), sys.argv[1], "exec")' "$src/atticus.py"
+                python3 -c 'import pathlib, sys; compile(pathlib.Path(sys.argv[1]).read_text(), sys.argv[1], "exec")' "$src/jarvis.py"
                 bash -n "$src/build.sh"
                 bash -n "$src/install.sh"
-                printf '%s\n' 'atticus source checks passed'
+                printf '%s\n' 'jarvis source checks passed'
                 ;;
               --version)
-                printf '%s\n' "atticus ${version}"
+                printf '%s\n' "jarvis ${version}"
                 ;;
               --help|-h|help)
                 cat <<'EOF'
-            Atticus launcher for macOS.
+            Jarvis launcher for macOS.
 
             Usage:
-              atticus              Install or update Atticus.app
-              atticus --install    Install or update Atticus.app
-              atticus --check      Run packaged source checks
-              atticus --version    Print the packaged version
-              atticus --help       Show this help
+              jarvis              Install or update Jarvis.app
+              jarvis --install    Install or update Jarvis.app
+              jarvis --check      Run packaged source checks
+              jarvis --version    Print the packaged version
+              jarvis --help       Show this help
 
             Building requires macOS 26 or later and Apple's command line tools.
             Full use also requires Claude Code (with Claude or a custom server), Devin, or Pi.
@@ -78,10 +78,10 @@
             esac
           '';
           meta = with pkgs.lib; {
-            description = "Atticus macOS app launcher";
-            homepage = "https://github.com/SaarthurR/atticus-mac";
+            description = "Jarvis macOS app launcher";
+            homepage = "https://github.com/Iam-Sherlock/atticus-mac";
             license = licenses.mit;
-            mainProgram = "atticus";
+            mainProgram = "jarvis";
             platforms = targetSystems;
           };
         };
@@ -90,30 +90,30 @@
       packages = forEachSystem (
         system:
         let
-          atticus = packageFor system;
+          jarvis = packageFor system;
         in
         {
-          inherit atticus;
-          atticus-mac = atticus;
-          source = atticus;
-          default = atticus;
+          inherit jarvis;
+          jarvis-mac = jarvis;
+          source = jarvis;
+          default = jarvis;
         }
       );
 
       apps = forEachSystem (
         system:
         let
-          atticus = self.packages.${system}.default;
-          program = "${atticus}/bin/atticus";
+          jarvis = self.packages.${system}.default;
+          program = "${jarvis}/bin/jarvis";
           app = {
             type = "app";
             inherit program;
-            inherit (atticus) meta;
+            inherit (jarvis) meta;
           };
         in
         {
-          atticus = app;
-          atticus-mac = app;
+          jarvis = app;
+          jarvis-mac = app;
           default = app;
         }
       );
@@ -133,7 +133,7 @@
               pkgs.act
             ];
             shellHook = ''
-              echo "Atticus development shell. Building the app requires Apple's command line tools."
+              echo "Jarvis development shell. Building the app requires Apple's command line tools."
             '';
           };
       });
